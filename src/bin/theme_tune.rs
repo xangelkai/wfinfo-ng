@@ -11,7 +11,7 @@ use eframe::{
     epaint::ColorImage,
 };
 use egui_extras::RetainedImage;
-use image::{io::Reader, DynamicImage, Rgb};
+use image::{DynamicImage, ImageReader as Reader, Rgb};
 use palette::{FromColor, Hsl, Srgb};
 use wfinfo::{
     database::Database,

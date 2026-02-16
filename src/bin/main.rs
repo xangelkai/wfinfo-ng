@@ -22,10 +22,45 @@ use wfinfo::{
     utils::fetch_prices_and_items,
 };
 
-fn run_detection(capturer: &Window, db: &Database) {
-    let frame = capturer.capture_image().unwrap();
-    info!("Captured");
-    let image = DynamicImage::ImageRgba8(frame);
+fn capture_frame(window: Option<&Window>) -> DynamicImage {
+    if let Some(w) = window {
+        return DynamicImage::ImageRgba8(w.capture_image().unwrap());
+    }
+
+    let path = std::env::temp_dir().join("wfinfo_capture.png");
+    let p = path.to_str().unwrap();
+
+    let tools: &[&[&str]] = &[
+        &["grim", p],
+        &["spectacle", "-b", "-n", "-a", "-o", p],
+        &["spectacle", "-b", "-n", "-m", "-o", p],
+        &["gnome-screenshot", "-w", "-f", p],
+    ];
+
+    for cmd in tools {
+        let _ = std::fs::remove_file(&path);
+        debug!("trying: {:?}", cmd);
+        match std::process::Command::new(cmd[0]).args(&cmd[1..]).output() {
+            Ok(out) => {
+                debug!(
+                    "{}: exit={}, stderr={}",
+                    cmd[0],
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                if out.status.success() && path.exists() {
+                    return image::open(&path).unwrap();
+                }
+            }
+            Err(e) => debug!("{}: {}", cmd[0], e),
+        }
+    }
+
+    panic!("no screenshot tool found (install grim, spectacle, or gnome-screenshot)");
+}
+
+fn run_detection(capturer: Option<&Window>, db: &Database) {
+    let image = capture_frame(capturer);
     info!("Converted");
     let text = reward_image_to_reward_names(image, None);
     let text = text.iter().map(|s| normalize_string(s));
@@ -180,16 +215,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         .format_target(false)
         .init();
 
-    let windows = Window::all()?;
-    let Some(warframe_window) = windows.iter().find(|x| x.title() == window_name) else {
-        return Err("Warframe window not found".into());
-    };
+    let windows = Window::all().unwrap_or_default();
+    let warframe_window = windows.iter()
+        .find(|x| x.title().ok().as_deref() == Some(window_name.as_str()))
+        .or_else(|| windows.iter().find(|x| {
+            x.title().map(|t| t.contains(&window_name)).unwrap_or(false)
+        }));
 
-    debug!(
-        "Capture source resolution: {:?}x{:?}",
-        warframe_window.width(),
-        warframe_window.height()
-    );
+    if let Some(w) = warframe_window {
+        debug!("Capture source resolution: {:?}x{:?}", w.width(), w.height());
+    } else {
+        warn!("X11 window \"{window_name}\" not found, using grim for screen capture");
+    }
 
     let (prices, items) = fetch_prices_and_items()?;
     let db = Database::load_from_file(Some(&prices), Some(&items));
@@ -215,7 +252,7 @@ mod test {
     use std::collections::BTreeMap;
     use std::fs::read_to_string;
 
-    use image::io::Reader;
+    use image::ImageReader as Reader;
     use indexmap::IndexMap;
     use rayon::prelude::*;
     use tesseract::Tesseract;

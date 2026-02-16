@@ -1,6 +1,6 @@
 use std::{fs::write, path::PathBuf};
 
-use image::io::Reader;
+use image::ImageReader as Reader;
 use indexmap::IndexMap;
 use wfinfo::{
     database::Database,
