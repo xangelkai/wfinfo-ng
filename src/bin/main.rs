@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::thread::sleep;
 use std::time::Duration;
 use std::{error::Error, str::FromStr};
@@ -18,9 +19,15 @@ use xcap::Window;
 
 use wfinfo::{
     database::Database,
-    ocr::{normalize_string, reward_image_to_reward_names, OCR},
+    ocr::{image_to_string, normalize_string, reward_image_to_reward_names, OCR},
     utils::fetch_prices_and_items,
 };
+
+enum Event {
+    RewardDetect,
+    InventoryCapture,
+    InventoryDone,
+}
 
 fn capture_frame(window: Option<&Window>) -> DynamicImage {
     if let Some(w) = window {
@@ -96,7 +103,7 @@ fn run_detection(capturer: Option<&Window>, db: &Database) {
     }
 }
 
-fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
+fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<Event>) {
     debug!("Path: {}", path.display());
     let mut position = File::open(&path)
         .unwrap_or_else(|_| panic!("Couldn't open file {}", path.display()))
@@ -141,7 +148,7 @@ fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
                     if reward_screen_detected {
                         info!("Detected, waiting...");
                         sleep(Duration::from_millis(1500));
-                        event_sender.send(()).unwrap();
+                        event_sender.send(Event::RewardDetect).unwrap();
                     }
 
                     position = f.metadata().unwrap().len();
@@ -156,19 +163,67 @@ fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
     });
 }
 
-fn hotkey_watcher(hotkey: HotKey, event_sender: mpsc::Sender<()>) {
-    debug!("watching hotkey: {hotkey:?}");
+fn hotkey_watcher(event_sender: mpsc::Sender<Event>) {
     thread::spawn(move || {
         let manager = GlobalHotKeyManager::new().unwrap();
-        manager.register(hotkey).unwrap();
 
-        while let Ok(event) = GlobalHotKeyEvent::receiver().recv() {
-            debug!("{:?}", event);
-            if event.state == HotKeyState::Pressed {
-                event_sender.send(()).unwrap();
-            }
+        let hk_detect: HotKey = "F12".parse().unwrap();
+        let hk_scan: HotKey = "F10".parse().unwrap();
+        let hk_done: HotKey = "F9".parse().unwrap();
+
+        manager.register(hk_detect).unwrap();
+        manager.register(hk_scan).unwrap();
+        manager.register(hk_done).unwrap();
+
+        debug!("hotkeys: F12=reward, F10=inventory scan, F9=inventory done");
+
+        while let Ok(ev) = GlobalHotKeyEvent::receiver().recv() {
+            if ev.state != HotKeyState::Pressed { continue; }
+            let event = if ev.id == hk_detect.id() {
+                Event::RewardDetect
+            } else if ev.id == hk_scan.id() {
+                Event::InventoryCapture
+            } else if ev.id == hk_done.id() {
+                Event::InventoryDone
+            } else {
+                continue;
+            };
+            let _ = event_sender.send(event);
         }
     });
+}
+
+fn scan_inventory_page(
+    capturer: Option<&Window>,
+    db: &Database,
+    inventory: &mut HashSet<String>,
+) {
+    let image = capture_frame(capturer);
+    let rgb = DynamicImage::ImageRgb8(image.to_rgb8());
+    let text = image_to_string(&mut OCR.lock().unwrap(), &rgb);
+    let mut found = 0;
+    for line in text.lines() {
+        let norm = normalize_string(line);
+        if norm.len() < 5 { continue; }
+        if let Some(item) = db.find_item(&norm, None) {
+            if inventory.insert(item.name.clone()) {
+                found += 1;
+                debug!("+ {}", item.drop_name);
+            }
+        }
+    }
+    info!("{} new, {} total", found, inventory.len());
+}
+
+fn finish_inventory_scan(db: &Database, inventory: &mut HashSet<String>) {
+    let mut results: Vec<_> = inventory.drain()
+        .filter_map(|name| db.find_item_exact(&name))
+        .collect();
+    results.sort_by(|a, b| b.platinum.total_cmp(&a.platinum));
+    info!("=== Inventory Scan: {} items ===", results.len());
+    for item in &results {
+        info!("{:<45} {:>8.1} plat", item.drop_name, item.platinum);
+    }
 }
 
 #[allow(dead_code)]
@@ -236,11 +291,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (event_sender, event_receiver) = channel();
 
     log_watcher(log_path, event_sender.clone());
-    hotkey_watcher("F12".parse()?, event_sender);
+    hotkey_watcher(event_sender);
 
-    while let Ok(()) = event_receiver.recv() {
-        info!("Capturing");
-        run_detection(warframe_window, &db);
+    let mut inventory: HashSet<String> = HashSet::new();
+
+    while let Ok(event) = event_receiver.recv() {
+        match event {
+            Event::RewardDetect => {
+                info!("Capturing");
+                run_detection(warframe_window, &db);
+            }
+            Event::InventoryCapture => {
+                info!("Scanning inventory page...");
+                scan_inventory_page(warframe_window, &db, &mut inventory);
+            }
+            Event::InventoryDone => {
+                if inventory.is_empty() { continue; }
+                finish_inventory_scan(&db, &mut inventory);
+            }
+        }
     }
 
     drop(OCR.lock().unwrap().take());
