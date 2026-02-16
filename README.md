@@ -20,9 +20,10 @@ Doesn't support:
 # Prerequisites and Dependencies
 
 - `rust` rustc >= 1.74 & cargo. I recommend installation via [rustup](https://rustup.rs).
-- `libxrandr` for taking screenshots
 - `tesseract` for OCR processing
 - `curl`, `jq` for updating the databases
+- **X11/XWayland**: `libxrandr` for taking screenshots
+- **Wayland native** (e.g. `PROTON_ENABLE_WAYLAND=1`): one of `grim`, `spectacle`, or `gnome-screenshot`
 
 # Installation
 
@@ -52,6 +53,8 @@ When the highest value is determined by the ducat value and there is more than o
 
 
 - If you are using gamescope add the flag `--window-name=gamescope`
+
+- If you are running the game with `PROTON_ENABLE_WAYLAND=1`, the program will automatically fall back to capturing the screen via `spectacle`/`grim`/`gnome-screenshot` since native Wayland windows are not visible through X11.
 
 # Logging
 
